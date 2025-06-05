@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Persistent File System - MMO</title>
+<style>
+  /* Basic styling and animations */
+  body {
+    margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #1e1e2f; color: #eee;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    background: #292946; padding: 10px 20px;
+    font-size: 1.4rem; font-weight: bold; letter-spacing: 1px;
+    color: #7aa7ff;
+    user-select: none;
+  }
+  #search-container {
+    margin: 10px 20px;
+  }
+  #search {
+    width: 100%; padding: 8px; font-size: 1rem;
+    border-radius: 5px; border: none;
+    box-shadow: 0 0 5px #7aa7ff;
+    background: #2b2b3f; color: #eee;
+  }
+  main {
+    flex: 1; display: flex; flex-direction: column;
+    padding: 0 20px 20px 20px;
+    overflow: hidden;
+  }
+  #path {
+    margin-bottom: 10px; font-size: 0.9rem;
+    color: #aabcee;
+  }
+  #file-system {
+    flex: 1;
+    background: #252536;
+    border-radius: 8px;
+    padding: 15px;
+    overflow-y: auto;
+    display: flex; flex-wrap: wrap;
+    gap: 10px;
+  }
+  .item {
+    background: #3a3a5e;
+    padding: 10px;
+    border-radius: 8px;
+    width: 120px;
+    cursor: pointer;
+    display: flex; flex-direction: column; align-items: center;
+    transition: background 0.3s ease;
+  }
+  .item:hover {
+    background: #5666ff;
+  }
+  .icon {
+    font-size: 2.5rem;
+    margin-bottom: 5px;
+  }
+  .item-name {
+    word-break: break-word;
+    text-align: center;
+  }
+  footer {
+    text-align: center;
+    padding: 10px;
+    background: #292946;
+    font-size: 0.8rem;
+    color: #666;
+    user-select: none;
+  }
+  #actions {
+    margin: 10px 20px;
+    display: flex;
+    gap: 10px;
+  }
+  button {
+    background: #5666ff;
+    border: none;
+    color: white;
+    padding: 10px 15px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background 0.25s ease;
+  }
+  button:hover {
+    background: #3948ff;
+  }
+  button:disabled {
+    background: #444a8a;
+    cursor: not-allowed;
+  }
+  /* Modal for editing file content */
+  #editor-modal {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85);
+    display: none;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+  }
+  #editor-content {
+    background: #1f1f2f;
+    border-radius: 10px;
+    padding: 20px;
+    width: 90%;
+    max-width: 600px;
+    display: flex;
+    flex-direction: column;
+  }
+  #file-editor {
+    width: 100%;
+    height: 300px;
+    background: #292946;
+    border: none;
+    border-radius: 6px;
+    color: #eee;
+    font-family: monospace;
+    font-size: 1rem;
+    padding: 10px;
+    resize: vertical;
+  }
+  #editor-buttons {
+    margin-top: 10px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
+  #editor-buttons button {
+    background: #5666ff;
+  }
+</style>
+</head>
+<body>
+
+<header>MMO Persistent File System</header>
+
+<div id="search-container">
+  <input type="search" id="search" placeholder="Search files and folders..." autocomplete="off" />
+</div>
+
+<div id="actions">
+  <button id="btn-new-folder">New Folder</button>
+  <button id="btn-new-file">New File</button>
+  <button id="btn-upload-file">Upload File</button>
+  <button id="btn-download-file" disabled>Download Selected File</button>
+</div>
+
+<main>
+  <div id="path">/</div>
+  <div id="file-system" role="list" aria-label="File system"></div>
+</main>
+
+<footer>by MMO &copy; All rights reserved</footer>
+
+<!-- Hidden file input for uploading -->
+<input type="file" id="file-uploader" multiple style="display:none" />
+
+<!-- Modal for editing file -->
+<div id="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+  <div id="editor-content">
+    <h2 id="editor-title" style="color:#7aa7ff; margin: 0 0 10px 0;">Edit File</h2>
+    <textarea id="file-editor" spellcheck="false" aria-label="File content editor"></textarea>
+    <div id="editor-buttons">
+      <button id="btn-save-file">Save</button>
+      <button id="btn-cancel-edit">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // Utility to create UUIDv4 for file/folder IDs
+  function uuidv4() {
+    return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c =>
+      (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+    );
+  }
+
+  // IndexedDB setup
+  const DB_NAME = 'MMOFileSystemDB';
+  const STORE_NAME = 'files';
+
+  let db;
+  let currentPath = [];
+  let allFiles = [];
+  let selectedFile = null;
+  let editingFile = null;
+
+  // DOM elements
+  const fileSystemEl = document.getElementById('file-system');
+  const pathEl = document.getElementById('path');
+  const searchInput = document.getElementById('search');
+  const btnNewFolder = document.getElementById('btn-new-folder');
+  const btnNewFile = document.getElementById('btn-new-file');
+  const btnUploadFile = document.getElementById('btn-upload-file');
+  const btnDownloadFile = document.getElementById('btn-download-file');
+  const fileUploader = document.getElementById('file-uploader');
+  const editorModal = document.getElementById('editor-modal');
+  const fileEditor = document.getElementById('file-editor');
+  const btnSaveFile = document.getElementById('btn-save-file');
+  const btnCancelEdit = document.getElementById('btn-cancel-edit');
+
+  // Open or create DB
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        db = req.result;
+        resolve();
+      };
+      req.onupgradeneeded = e => {
+        db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+        }
+      };
+    });
+  }
+
+  // Add or update file/folder
+  function putFile(file) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.put(file);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  // Delete file/folder by ID
+  function deleteFile(id) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  // Get all files/folders
+  function getAllFiles() {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  // Helpers
+  function currentFolderId() {
+    if(currentPath.length === 0) return null;
+    return currentPath[currentPath.length - 1].id;
+  }
+
+  function getFilesInCurrentFolder() {
+    const folderId = currentFolderId();
+    return allFiles.filter(f => (f.parentId === folderId));
+  }
+
+  function filterBySearch(files, query) {
+    if(!query) return files;
+    query = query.toLowerCase();
+    return files.filter(f => f.name.toLowerCase().includes(query));
+  }
+
+  // Render path breadcrumbs
+  function renderPath() {
+    if(currentPath.length === 0){
+      pathEl.textContent = '/';
+      return;
+    }
+    pathEl.textContent = '/' + currentPath.map(f => f.name).join('/');
+  }
+
+  // Render the file system items
+  function renderFileSystem() {
+    const query = searchInput.value.trim();
+    const items = filterBySearch(getFilesInCurrentFolder(), query);
+    fileSystemEl.innerHTML = '';
+
+    // Sort folders first
+    const folders = items.filter(f => f.type === 'folder').sort((a,b) => a.name.localeCompare(b.name));
+    const files = items.filter(f => f.type === 'file').sort((a,b) => a.name.localeCompare(b.name));
+
+    folders.forEach(folder => {
+      const div = document.createElement('div');
+      div.className = 'item folder';
+      div.tabIndex = 0;
+      div.setAttribute('role', 'button');
+      div.setAttribute('aria-label', `Folder: ${folder.name}`);
+      div.innerHTML = `<span class="icon">📁</span><span class="item-name">${folder.name}</span>`;
+      div.onclick = () => {
+        currentPath.push(folder);
+        selectedFile = null;
+        renderPath();
+        renderFileSystem();
+        btnDownloadFile.disabled = true;
+      };
+      div.onkeydown = e => {
+        if(e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          div.click();
+        }
+      };
+      fileSystemEl.appendChild(div);
+    });
+
+    files.forEach(file => {
+      const div = document.createElement('div');
+      div.className = 'item file';
+      div.tabIndex = 0;
+      div.setAttribute('role', 'button');
+      div.setAttribute('aria-label', `File: ${file.name}`);
+      div.innerHTML = `<span class="icon">📄</span><span class="item-name">${file.name}</span>`;
+      div.onclick = () => {
+        selectedFile = file;
+        openEditor(file);
+        btnDownloadFile.disabled = false;
+      };
+      div.onkeydown = e => {
+        if(e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          div.click();
+        }
+      };
+      fileSystemEl.appendChild(div);
+    });
+  }
+
+  // Open editor modal
+  function openEditor(file) {
+    editingFile = file;
+    fileEditor.value = file.content || '';
+    editorModal.style.display = 'flex';
+    fileEditor.focus();
+  }
+
+  // Close editor modal
+  function closeEditor() {
+    editingFile = null;
+    editorModal.style.display = 'none';
+  }
+
+  // Save edited file content
+  async function saveFileContent() {
+    if(!editingFile) return;
+    editingFile.content = fileEditor.value;
+    await putFile(editingFile);
+    allFiles = await getAllFiles();
+    renderFileSystem();
+    closeEditor();
+  }
+
+  // Create new folder
+  async function createNewFolder() {
+    let name = prompt('Enter new folder name');
+    if(!name) return;
+    name = name.trim();
+    if(!name) return;
+    if(name.length > 64) {
+      alert('Name too long (max 64 chars)');
+      return;
+    }
+    const folder = {
+      id: uuidv4(),
+      name,
+      parentId: currentFolderId(),
+      type: 'folder',
+      createdAt: new Date().toISOString()
+    };
+    await putFile(folder);
+    allFiles = await getAllFiles();
+    renderFileSystem();
+  }
+
+  // Create new empty file
+  async function createNewFile() {
+    let name = prompt('Enter new file name');
+    if(!name) return;
+    name = name.trim();
+    if(!name) return;
+    if(name.length > 64) {
+      alert('Name too long (max 64 chars)');
+      return;
+    }
+    const file = {
+      id: uuidv4(),
+      name,
+      parentId: currentFolderId(),
+      type: 'file',
+      content: '',
+      createdAt: new Date().toISOString()
+    };
+    await putFile(file);
+    allFiles = await getAllFiles();
+    renderFileSystem();
+  }
+
+  // Upload files from disk
+  function uploadFiles(files) {
+    for(const file of files) {
+      const reader = new FileReader();
+      reader.onload = async e => {
+        const content = e.target.result;
+        const newFile = {
+          id: uuidv4(),
+          name: file.name,
+          parentId: currentFolderId(),
+          type: 'file',
+          content,
+          createdAt: new Date().toISOString()
+        };
+        await putFile(newFile);
+        allFiles = await getAllFiles();
+        renderFileSystem();
+      };
+      reader.readAsText(file);
+    }
+  }
+
+  // Download selected file content
+  function downloadSelectedFile() {
+    if(!selectedFile) return;
+    const blob = new Blob([selectedFile.content || ''], {type: 'text/plain'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = selectedFile.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // Navigate up folder
+  function navigateUp() {
+    if(currentPath.length > 0) {
+      currentPath.pop();
+      selectedFile = null;
+      renderPath();
+      renderFileSystem();
+      btnDownloadFile.disabled = true;
+    }
+  }
+
+  // Keyboard shortcut for going up folder: Backspace or Alt+Left
+  document.addEventListener('keydown', e => {
+    if((e.key === 'Backspace' || (e.key === 'ArrowLeft' && e.altKey)) && !editorModal.style.display) {
+      e.preventDefault();
+      navigateUp();
+    }
+  });
+
+  // Search debounce helper
+  let searchTimeout;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(renderFileSystem, 300);
+  });
+
+  // Button events
+  btnNewFolder.onclick = createNewFolder;
+  btnNewFile.onclick = createNewFile;
+  btnUploadFile.onclick = () => fileUploader.click();
+  btnDownloadFile.onclick = downloadSelectedFile;
+  fileUploader.onchange = e => {
+    if(e.target.files.length) uploadFiles(e.target.files);
+    e.target.value = '';
+  };
+
+  btnSaveFile.onclick = saveFileContent;
+  btnCancelEdit.onclick = closeEditor;
+
+  // Close modal on outside click
+  editorModal.onclick = e => {
+    if(e.target === editorModal) closeEditor();
+  };
+
+  // Init app
+  async function init() {
+    await openDB();
+    allFiles = await getAllFiles();
+
+    // If no root folder, create it (null parent)
+    if(!allFiles.some(f => f.parentId === null)) {
+      const rootFolder = {
+        id: uuidv4(),
+        name: 'root',
+        parentId: null,
+        type: 'folder',
+        createdAt: new Date().toISOString()
+      };
+      await putFile(rootFolder);
+      allFiles = await getAllFiles();
+    }
+
+    // Set current path to root folder
+    currentPath = [allFiles.find(f => f.parentId === null)];
+
+    renderPath();
+    renderFileSystem();
+  }
+
+  init();
+})();
+</script>
+
+</body>
+</html>
